@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::collections::HashSet;
+use std::{collections::HashSet, rc::Rc};
 
 #[derive(Debug, Clone)]
 struct CollaboratorResult {
@@ -8,19 +8,38 @@ struct CollaboratorResult {
     name: String,
 }
 
+#[derive(Debug, Clone)]
+struct ContractResult {
+    id: String,
+    name: String,
+    contract_type: String,
+}
+
 fn get_collaborator_result_somehow(ids: &[String]) -> Vec<CollaboratorResult> {
-    let mut unique_ids = HashSet::<String>::with_capacity(ids.len());
     let mut results = Vec::<CollaboratorResult>::new();
+    let mut unique_ids = HashSet::<String>::with_capacity(ids.len());
+    unique_ids.extend(ids.into_iter().map(Clone::clone));
 
-    for id in ids.iter() {
-        if unique_ids.contains(id) {
-            continue;
-        }
-
-        unique_ids.insert(id.clone());
+    for id in unique_ids {
         results.push(CollaboratorResult {
-            id: id.clone(),
+            id,
             name: "fake".into(),
+        });
+    }
+
+    results
+}
+
+fn get_contract_result_somehow(ids: &[String]) -> Vec<ContractResult> {
+    let mut results = Vec::<ContractResult>::new();
+    let mut unique_ids = HashSet::<String>::with_capacity(ids.len());
+    unique_ids.extend(ids.into_iter().map(Clone::clone));
+
+    for id in unique_ids {
+        results.push(ContractResult {
+            id,
+            name: "fake".into(),
+            contract_type: "new".into(),
         });
     }
 
@@ -29,9 +48,25 @@ fn get_collaborator_result_somehow(ids: &[String]) -> Vec<CollaboratorResult> {
 
 // Expansion system
 
-trait CollaboratorExpandableResult<'a> {
-    fn get_collaborator_ids(&self) -> Vec<String>;
-    fn set_collaborators(&mut self, collaborators: &'a [CollaboratorResult]) -> ();
+trait ExpandableResult<T> {
+    fn get_expand_ids(&self) -> Vec<&String>;
+    fn set_expand_results(&mut self, collaborators: &[T]) -> ();
+}
+
+fn expand_result<T, F, R>(expandables: &mut [T], f: F)
+where
+    T: ExpandableResult<Rc<R>>,
+    F: FnOnce(Vec<String>) -> Vec<Rc<R>>,
+{
+    let ids = expandables
+        .iter()
+        .flat_map(|x| x.get_expand_ids())
+        .cloned()
+        .collect::<Vec<String>>();
+    let results = f(ids);
+    for exp in expandables.iter_mut() {
+        exp.set_expand_results(&results);
+    }
 }
 
 // Expansion Integration
@@ -45,11 +80,12 @@ struct ObservationResult {
     referenced_id: String,
 
     // Expaned:
-    owner: Option<CollaboratorResult>,
-    referenced: Option<CollaboratorResult>,
+    owner: Option<Rc<CollaboratorResult>>,
+    referenced: Option<Rc<CollaboratorResult>>,
+    contract: Option<Rc<ContractResult>>,
 }
 
-impl<'a> ObservationResult {
+impl ObservationResult {
     fn new() -> ObservationResult {
         ObservationResult {
             id: "observation:1".into(),
@@ -59,6 +95,7 @@ impl<'a> ObservationResult {
             referenced_id: "referenced_id:3".into(),
             owner: None,
             referenced: None,
+            contract: None,
         }
     }
 
@@ -67,45 +104,69 @@ impl<'a> ObservationResult {
     }
 }
 
-impl<'a> CollaboratorExpandableResult<'a> for ObservationResult {
-    fn get_collaborator_ids(&self) -> Vec<String> {
-        vec![self.owner_id.clone(), self.referenced_id.clone()]
+impl ExpandableResult<Rc<CollaboratorResult>> for ObservationResult {
+    fn get_expand_ids(&self) -> Vec<&String> {
+        vec![&self.owner_id, &self.referenced_id]
     }
 
-    fn set_collaborators(&mut self, collaborators: &'a [CollaboratorResult]) {
+    fn set_expand_results(&mut self, collaborators: &[Rc<CollaboratorResult>]) {
         for collaborator in collaborators.iter() {
             if self.owner_id == collaborator.id {
-                self.owner = Some(collaborator.clone());
+                self.owner = Some(Rc::clone(collaborator));
             }
             if self.referenced_id == collaborator.id {
-                self.referenced = Some(collaborator.clone());
+                self.referenced = Some(Rc::clone(collaborator));
             }
         }
     }
 }
 
-fn expand_obs(obss: &mut [ObservationResult]) {
-    let collaborators = get_collaborator_result_somehow(
-        &obss
-            .iter()
-            .flat_map(|x| x.get_collaborator_ids())
-            .collect::<Vec<String>>(),
-    );
+impl ExpandableResult<Rc<ContractResult>> for ObservationResult {
+    fn get_expand_ids(&self) -> Vec<&String> {
+        vec![&self.contract_id]
+    }
 
-    for obs in obss.iter_mut() {
-        obs.set_collaborators(&collaborators);
+    fn set_expand_results(&mut self, contracts: &[Rc<ContractResult>]) {
+        for contract in contracts.iter() {
+            if self.contract_id == contract.id {
+                self.contract = Some(Rc::clone(contract));
+            }
+        }
     }
 }
 
 fn main() {
-    let mut obss = [
-        ObservationResult::new(),
-        ObservationResult::new(),
-        ObservationResult::new(),
-        ObservationResult::new(),
-    ];
+    let mut obss = [ObservationResult::new()];
+    println!("initial: {:#?}", &obss);
+    for obs in obss.iter() {
+        assert!(obs.contract.is_none());
+        assert!(obs.owner.is_none());
+        assert!(obs.referenced.is_none());
+    }
 
-    expand_obs(&mut obss);
+    expand_result(&mut obss, |ids| {
+        get_collaborator_result_somehow(&ids)
+            .into_iter()
+            .map(Rc::new)
+            .collect()
+    });
+    println!("after collaborator: {:#?}", &obss);
+    for obs in obss.iter() {
+        assert!(obs.contract.is_none());
+        assert!(obs.owner.is_some());
+        assert!(obs.referenced.is_some());
+    }
 
-    println!("{:?}", &obss);
+    expand_result(&mut obss, |ids| {
+        get_contract_result_somehow(&ids)
+            .into_iter()
+            .map(Rc::new)
+            .collect()
+    });
+    println!("after contract: {:#?}", &obss);
+    for obs in obss.iter() {
+        assert!(obs.contract.is_some());
+        assert!(obs.owner.is_some());
+        assert!(obs.referenced.is_some());
+    }
 }
